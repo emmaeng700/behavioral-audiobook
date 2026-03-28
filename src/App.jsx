@@ -9,34 +9,38 @@ function useOfflineDownload() {
   })
   const [progress, setProgress] = useState(0)
 
-  useEffect(() => {
-    if (!('serviceWorker' in navigator)) return
-    navigator.serviceWorker.addEventListener('message', e => {
-      if (e.data?.type === 'CACHE_PROGRESS') {
-        setProgress(Math.round((e.data.done / e.data.total) * 100))
-      }
-      if (e.data?.type === 'CACHE_DONE') {
-        setStatus('ready')
-        try { localStorage.setItem('offline-ready', '1') } catch {}
-      }
-    })
-  }, [])
-
   const download = useCallback(async () => {
-    if (!('serviceWorker' in navigator)) { alert('Service workers not supported on this browser.'); return }
+    if (!('caches' in window)) {
+      alert('Offline caching is not supported on this browser.')
+      return
+    }
     setStatus('loading')
     setProgress(0)
+
     try {
-      const reg = await navigator.serviceWorker.ready
-      // Collect all URLs currently loaded in the page
+      // Collect all resources the browser already loaded for this page
+      const resourceEntries = performance.getEntriesByType('resource')
       const urls = [
-        '/',
-        ...Array.from(document.querySelectorAll('script[src], link[rel=stylesheet]'))
-          .map(el => el.src || el.href)
-          .filter(u => u && u.startsWith(location.origin))
-          .map(u => new URL(u).pathname),
+        location.href,
+        ...resourceEntries
+          .map(e => e.name)
+          .filter(u => u.startsWith(location.origin)),
       ]
-      reg.active?.postMessage({ type: 'CACHE_ALL', urls })
+
+      const cache = await caches.open('audiobook-v1')
+      let done = 0
+
+      for (const url of urls) {
+        try {
+          const res = await fetch(url, { cache: 'reload' })
+          if (res.ok) await cache.put(url, res)
+        } catch {}
+        done++
+        setProgress(Math.round((done / urls.length) * 100))
+      }
+
+      setStatus('ready')
+      try { localStorage.setItem('offline-ready', '1') } catch {}
     } catch {
       setStatus('idle')
     }
@@ -48,7 +52,7 @@ function useOfflineDownload() {
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const CATEGORIES = ['All', ...Array.from(new Set(questions.map(q => q.category))).sort()]
-const SPEEDS = [0.75, 0.85, 1, 1.25, 1.5, 2]
+const SPEEDS = [0.7, 0.8, 0.9, 1, 1.25, 1.5]
 
 // ── Text builder ──────────────────────────────────────────────────────────────
 
@@ -195,7 +199,7 @@ export default function App() {
 
   const [cat, setCat] = useState('All')
   const [mode, setMode] = useState('full')   // 'question' | 'full'
-  const [speed, setSpeed] = useState(0.85)
+  const [speed, setSpeed] = useState(0.8)
   const [autoAdvance, setAutoAdvance] = useState(true)
   const [loop, setLoop] = useState(true)
 
