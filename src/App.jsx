@@ -4,7 +4,7 @@ import questions from './data/behavioral_questions.json'
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const CATEGORIES = ['All', ...Array.from(new Set(questions.map(q => q.category))).sort()]
-const SPEEDS = [0.75, 1, 1.25, 1.5, 2]
+const SPEEDS = [0.75, 0.9, 1, 1.25, 1.5, 2]
 
 // ── Text builder ──────────────────────────────────────────────────────────────
 
@@ -146,7 +146,7 @@ document.head.appendChild(style)
 export default function App() {
   const [cat, setCat] = useState('All')
   const [mode, setMode] = useState('full')   // 'question' | 'full'
-  const [speed, setSpeed] = useState(1)
+  const [speed, setSpeed] = useState(0.9)
   const [autoAdvance, setAutoAdvance] = useState(true)
   const [loop, setLoop] = useState(true)
 
@@ -162,11 +162,17 @@ export default function App() {
   const stopFlag = useRef(false)
   const playRef = useRef({ deck: [], idx: 0, speed: 1, voiceIdx: 0, mode: 'full', auto: true, loop: true })
 
-  // Load voices
+  // Load voices and auto-select a male English voice
   useEffect(() => {
     const load = () => {
-      const v = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'))
-      if (v.length) setVoices(v)
+      const all = window.speechSynthesis.getVoices()
+      const en = all.filter(v => v.lang.startsWith('en'))
+      if (!en.length) return
+      setVoices(en)
+      // Prefer known male voices by name keywords
+      const maleKeywords = ['male', 'david', 'daniel', 'alex', 'james', 'ryan', 'thomas', 'mark', 'george', 'fred', 'bruce', 'albert', 'bad', 'ralph', 'reed']
+      const maleIdx = en.findIndex(v => maleKeywords.some(k => v.name.toLowerCase().includes(k)))
+      if (maleIdx !== -1) setVoiceIdx(maleIdx)
     }
     load()
     window.speechSynthesis.addEventListener('voiceschanged', load)
