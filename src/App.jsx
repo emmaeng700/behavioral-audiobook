@@ -1,6 +1,50 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import questions from './data/behavioral_questions.json'
 
+// ── Offline download hook ─────────────────────────────────────────────────────
+
+function useOfflineDownload() {
+  const [status, setStatus] = useState(() => {
+    try { return localStorage.getItem('offline-ready') === '1' ? 'ready' : 'idle' } catch { return 'idle' }
+  })
+  const [progress, setProgress] = useState(0)
+
+  useEffect(() => {
+    if (!('serviceWorker' in navigator)) return
+    navigator.serviceWorker.addEventListener('message', e => {
+      if (e.data?.type === 'CACHE_PROGRESS') {
+        setProgress(Math.round((e.data.done / e.data.total) * 100))
+      }
+      if (e.data?.type === 'CACHE_DONE') {
+        setStatus('ready')
+        try { localStorage.setItem('offline-ready', '1') } catch {}
+      }
+    })
+  }, [])
+
+  const download = useCallback(async () => {
+    if (!('serviceWorker' in navigator)) { alert('Service workers not supported on this browser.'); return }
+    setStatus('loading')
+    setProgress(0)
+    try {
+      const reg = await navigator.serviceWorker.ready
+      // Collect all URLs currently loaded in the page
+      const urls = [
+        '/',
+        ...Array.from(document.querySelectorAll('script[src], link[rel=stylesheet]'))
+          .map(el => el.src || el.href)
+          .filter(u => u && u.startsWith(location.origin))
+          .map(u => new URL(u).pathname),
+      ]
+      reg.active?.postMessage({ type: 'CACHE_ALL', urls })
+    } catch {
+      setStatus('idle')
+    }
+  }, [])
+
+  return { status, progress, download }
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 const CATEGORIES = ['All', ...Array.from(new Set(questions.map(q => q.category))).sort()]
@@ -138,12 +182,17 @@ const s = {
 // ── Keyframe injection ────────────────────────────────────────────────────────
 
 const style = document.createElement('style')
-style.textContent = `@keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }`
+style.textContent = `
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.3} }
+  @keyframes spin { to { transform: rotate(360deg) } }
+`
 document.head.appendChild(style)
 
 // ── App ───────────────────────────────────────────────────────────────────────
 
 export default function App() {
+  const { status: offlineStatus, progress: offlineProgress, download: downloadOffline } = useOfflineDownload()
+
   const [cat, setCat] = useState('All')
   const [mode, setMode] = useState('full')   // 'question' | 'full'
   const [speed, setSpeed] = useState(0.85)
@@ -300,10 +349,35 @@ export default function App() {
       <header style={s.header}>
         <div style={s.headerInner}>
           <div style={s.logo}>🎧</div>
-          <div>
+          <div style={{ flex: 1 }}>
             <div style={s.title}>Behavioral Audiobook</div>
             <div style={s.sub}>Web Speech API · Works offline</div>
           </div>
+          {/* Offline download button */}
+          <button
+            onClick={offlineStatus === 'ready' ? undefined : downloadOffline}
+            disabled={offlineStatus === 'loading'}
+            style={{
+              display: 'flex', alignItems: 'center', gap: 6, padding: '7px 14px',
+              borderRadius: 12, border: '1.5px solid',
+              fontSize: 12, fontWeight: 700, cursor: offlineStatus === 'ready' ? 'default' : 'pointer',
+              transition: 'all 0.2s',
+              ...(offlineStatus === 'ready'
+                ? { background: '#ecfdf5', color: '#059669', borderColor: '#6ee7b7' }
+                : offlineStatus === 'loading'
+                ? { background: '#f5f3ff', color: '#7c3aed', borderColor: '#ddd6fe' }
+                : { background: '#fff', color: '#7c3aed', borderColor: '#ddd6fe' }),
+            }}
+          >
+            {offlineStatus === 'ready' && <>✓ Offline Ready</>}
+            {offlineStatus === 'loading' && (
+              <>
+                <span style={{ display: 'inline-block', width: 12, height: 12, border: '2px solid #7c3aed', borderTopColor: 'transparent', borderRadius: '50%', animation: 'spin 0.7s linear infinite' }} />
+                {offlineProgress > 0 ? `${offlineProgress}%` : 'Downloading…'}
+              </>
+            )}
+            {offlineStatus === 'idle' && <>⬇ Save Offline</>}
+          </button>
         </div>
       </header>
 
