@@ -1,132 +1,135 @@
 import { useState, useEffect, useCallback, useRef } from 'react'
 import './App.css'
 import questions from './data/behavioral_questions.json'
+import { idbGet, idbSet } from './idb.js'
+
+// ── Audio cache (in-memory blob URLs) ────────────────────────────────────────
+const blobCache = new Map()
+
+async function getAudioUrl(text, voice, speed) {
+  const key = `${voice}|${speed}|${text}`
+
+  // 1. Memory cache
+  if (blobCache.has(key)) return { url: blobCache.get(key), fromCache: true }
+
+  // 2. IndexedDB (offline cache)
+  try {
+    const stored = await idbGet(key)
+    if (stored) {
+      const url = URL.createObjectURL(new Blob([stored], { type: 'audio/mpeg' }))
+      blobCache.set(key, url)
+      return { url, fromCache: true }
+    }
+  } catch {}
+
+  // 3. Fetch from OpenAI via API route
+  const res = await fetch('/api/tts', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ text, voice, speed }),
+  })
+
+  if (!res.ok) throw new Error(await res.text())
+
+  const buffer = await res.arrayBuffer()
+
+  // Store in IndexedDB for offline use
+  try { await idbSet(key, buffer) } catch {}
+
+  const url = URL.createObjectURL(new Blob([buffer], { type: 'audio/mpeg' }))
+  blobCache.set(key, url)
+  return { url, fromCache: false }
+}
 
 // ── Offline download hook ─────────────────────────────────────────────────────
-
-function useOfflineDownload() {
+function useOfflineDownload(deck, mode, voice, speed) {
   const [status, setStatus] = useState(() => {
     try { return localStorage.getItem('offline-ready') === '1' ? 'ready' : 'idle' } catch { return 'idle' }
   })
   const [progress, setProgress] = useState(0)
 
   const download = useCallback(async () => {
-    if (!('caches' in window)) { alert('Offline caching not supported on this browser.'); return }
+    const texts = []
+    deck.forEach(q => {
+      texts.push(`${q.category}. ${q.question}`)
+      if (mode === 'full') {
+        q.stories.forEach((s, i) => {
+          texts.push(
+            `Story ${i + 1}: ${s.title}. Situation: ${s.situation}. ` +
+            `Task: ${s.task}. Action: ${s.action}. Result: ${s.result}.`
+          )
+        })
+      }
+    })
+
     setStatus('loading')
     setProgress(0)
-    try {
-      const resourceEntries = performance.getEntriesByType('resource')
-      const urls = [
-        location.href,
-        ...resourceEntries.map(e => e.name).filter(u => u.startsWith(location.origin)),
-      ]
-      const cache = await caches.open('audiobook-v1')
-      let done = 0
-      for (const url of urls) {
-        try {
-          const res = await fetch(url, { cache: 'reload' })
-          if (res.ok) await cache.put(url, res)
-        } catch {}
-        done++
-        setProgress(Math.round((done / urls.length) * 100))
-      }
-      setStatus('ready')
-      try { localStorage.setItem('offline-ready', '1') } catch {}
-    } catch {
-      setStatus('idle')
+    let done = 0
+
+    for (const text of texts) {
+      try { await getAudioUrl(text, voice, speed) } catch {}
+      done++
+      setProgress(Math.round((done / texts.length) * 100))
     }
-  }, [])
+
+    setStatus('ready')
+    try { localStorage.setItem('offline-ready', '1') } catch {}
+  }, [deck, mode, voice, speed])
 
   return { status, progress, download }
 }
 
 // ── Constants ─────────────────────────────────────────────────────────────────
-
 const CATEGORIES = ['All', ...Array.from(new Set(questions.map(q => q.category))).sort()]
-const SPEEDS = [0.5, 0.7, 0.8, 0.9, 1, 1.25, 1.5]
+const SPEEDS     = [0.5, 0.7, 0.8, 0.9, 1, 1.1, 1.25]
+const VOICES     = [
+  { id: 'nova',    label: 'Nova — Female, warm'        },
+  { id: 'shimmer', label: 'Shimmer — Female, soft'     },
+  { id: 'alloy',   label: 'Alloy — Neutral, clear'     },
+  { id: 'echo',    label: 'Echo — Male, smooth'        },
+  { id: 'onyx',    label: 'Onyx — Male, deep'          },
+  { id: 'fable',   label: 'Fable — British, expressive'},
+]
 
 // ── Text builder ──────────────────────────────────────────────────────────────
-
-function buildTexts(q, mode) {
-  const out = [`${q.category}. ${q.question}`]
+function buildSegments(q, mode) {
+  const segs = [`${q.category}. ${q.question}`]
   if (mode === 'full') {
     q.stories.forEach((s, i) => {
-      out.push(
-        `Story ${i + 1}: ${s.title}. ` +
-        `Situation: ${s.situation}. ` +
-        `Task: ${s.task}. ` +
-        `Action: ${s.action}. ` +
-        `Result: ${s.result}.`
+      segs.push(
+        `Story ${i + 1}: ${s.title}. Situation: ${s.situation}. ` +
+        `Task: ${s.task}. Action: ${s.action}. Result: ${s.result}.`
       )
     })
   }
-  return out
+  return segs
 }
 
 // ── App ───────────────────────────────────────────────────────────────────────
-
 export default function App() {
-  const { status: offlineStatus, progress: offlineProgress, download: downloadOffline } = useOfflineDownload()
-
-  const [cat, setCat] = useState('All')
-  const [mode, setMode] = useState('full')
-  const [speed, setSpeed] = useState(0.8)
+  const [cat,         setCat]         = useState('All')
+  const [mode,        setMode]        = useState('full')
+  const [speed,       setSpeed]       = useState(0.9)
+  const [voice,       setVoice]       = useState('nova')
   const [autoAdvance, setAutoAdvance] = useState(true)
-  const [loop, setLoop] = useState(true)
+  const [loop,        setLoop]        = useState(true)
+  const [apiErr,      setApiErr]      = useState('')
 
-  const [deck, setDeck] = useState([])
-  const [idx, setIdx] = useState(0)
+  const [deck,    setDeck]    = useState([])
+  const [idx,     setIdx]     = useState(0)
   const [playing, setPlaying] = useState(false)
-  const [paused, setPaused] = useState(false)
-  const [currentText, setCurrentText] = useState('')
+  const [paused,  setPaused]  = useState(false)
+  const [loading, setLoading] = useState(false) // fetching audio
+  const [curSeg,  setCurSeg]  = useState('')
 
-  const [voices, setVoices] = useState([])
-  const [voiceIdx, setVoiceIdx] = useState(0)
+  const audioRef  = useRef(null)  // current Audio element
+  const stopFlag  = useRef(false)
+  const playRef   = useRef({ deck: [], idx: 0, speed: 0.9, voice: 'nova', mode: 'full', auto: true, loop: true })
 
-  const stopFlag = useRef(false)
-  const playRef = useRef({ deck: [], idx: 0, speed: 0.8, voiceIdx: 0, mode: 'full', auto: true, loop: true })
+  const { status: offlineStatus, progress: offlineProgress, download: downloadOffline } =
+    useOfflineDownload(deck, mode, voice, speed)
 
-  // Load voices — filter out novelty/gimmick voices, auto-select best female
-  useEffect(() => {
-    const load = () => {
-      const all = window.speechSynthesis.getVoices()
-
-      // Novelty/robot/sound-effect voices — skip these entirely
-      const JUNK = ['bad news','bahh','bells','boing','bubbles','cellos','good news',
-        'jester','junior','kathy','organ','ralph','superstar','trinoids','whisper',
-        'wobble','zarvox','albert','fred']
-
-      const good = all.filter(v =>
-        v.lang.startsWith('en') &&
-        !JUNK.some(j => v.name.toLowerCase().includes(j))
-      )
-      if (!good.length) return
-      setVoices(good)
-
-      // Priority order for best-sounding female voices on Mac/iOS/Chrome
-      const FEMALE_PRIORITY = [
-        'flo (english (united states))',   // macOS modern — best female US
-        'shelley (english (united states))',
-        'sandy (english (united states))',
-        'google uk english female',        // Chrome — excellent online
-        'karen',                           // macOS AU — natural
-        'moira',                           // macOS IE — natural
-        'tessa',                           // macOS ZA — natural
-        'samantha',                        // macOS classic fallback
-        'flo', 'shelley', 'sandy',         // any locale variant
-      ]
-
-      for (const name of FEMALE_PRIORITY) {
-        const i = good.findIndex(v => v.name.toLowerCase().includes(name))
-        if (i !== -1) { setVoiceIdx(i); return }
-      }
-    }
-    load()
-    window.speechSynthesis.addEventListener('voiceschanged', load)
-    return () => window.speechSynthesis.removeEventListener('voiceschanged', load)
-  }, [])
-
-  // Build deck
+  // Build deck on category change
   useEffect(() => {
     const filtered = cat === 'All' ? questions : questions.filter(q => q.category === cat)
     stopAll()
@@ -134,67 +137,92 @@ export default function App() {
     setIdx(0)
     setPlaying(false)
     setPaused(false)
-    setCurrentText('')
+    setCurSeg('')
   }, [cat])
 
   // Sync refs
   useEffect(() => {
-    playRef.current = { deck, idx, speed, voiceIdx, mode, auto: autoAdvance, loop }
-  }, [deck, idx, speed, voiceIdx, mode, autoAdvance, loop])
+    playRef.current = { deck, idx, speed, voice, mode, auto: autoAdvance, loop }
+  }, [deck, idx, speed, voice, mode, autoAdvance, loop])
+
+  useEffect(() => () => stopAll(), [])
 
   const stopAll = useCallback(() => {
     stopFlag.current = true
-    window.speechSynthesis?.cancel()
-    setCurrentText('')
+    if (audioRef.current) { audioRef.current.pause(); audioRef.current = null }
+    setLoading(false)
+    setCurSeg('')
   }, [])
 
-  useEffect(() => () => window.speechSynthesis?.cancel(), [])
+  // ── Play a queue of text segments ─────────────────────────────────────────
 
-  // ── Speak ─────────────────────────────────────────────────────────────────
-
-  const speakQueue = useCallback((texts, pos, spd, voice, onDone) => {
-    if (stopFlag.current || pos >= texts.length) {
+  const speakQueue = useCallback(async (segs, pos, spd, vc, onDone) => {
+    if (stopFlag.current || pos >= segs.length) {
       if (!stopFlag.current) onDone()
       return
     }
-    setCurrentText(texts[pos])
-    const utt = new SpeechSynthesisUtterance(texts[pos])
-    utt.rate = spd
-    if (voice) utt.voice = voice
-    utt.onend = () => speakQueue(texts, pos + 1, spd, voice, onDone)
-    utt.onerror = () => { if (!stopFlag.current) onDone() }
-    window.speechSynthesis.speak(utt)
+
+    const text = segs[pos]
+    setCurSeg(text)
+    setLoading(true)
+    setApiErr('')
+
+    let url
+    try {
+      const result = await getAudioUrl(text, vc, spd)
+      url = result.url
+    } catch (err) {
+      setApiErr('OpenAI API unavailable — check your API key on Vercel.')
+      setLoading(false)
+      setPlaying(false)
+      return
+    }
+
+    if (stopFlag.current) return
+
+    setLoading(false)
+
+    const audio = new Audio(url)
+    audioRef.current = audio
+    audio.playbackRate = 1 // speed baked in by API
+    audio.onended  = () => speakQueue(segs, pos + 1, spd, vc, onDone)
+    audio.onerror  = () => { if (!stopFlag.current) onDone() }
+    audio.play().catch(() => { if (!stopFlag.current) onDone() })
   }, [])
 
-  const playFromIdx = useCallback((d, i, spd, vi, md, auto, lp) => {
+  const playFromIdx = useCallback((d, i, spd, vc, md, auto, lp) => {
     if (i < 0 || i >= d.length) return
     stopFlag.current = false
     setIdx(i); setPlaying(true); setPaused(false)
-    speakQueue(buildTexts(d[i], md), 0, spd, voices[vi], () => {
-      setCurrentText('')
+
+    speakQueue(buildSegments(d[i], md), 0, spd, vc, () => {
+      setCurSeg('')
       const next = i + 1
-      if (auto && next < d.length)       playFromIdx(d, next, spd, vi, md, auto, lp)
-      else if (auto && lp)               playFromIdx(d, 0, spd, vi, md, auto, lp)
+      if (auto && next < d.length)  playFromIdx(d, next, spd, vc, md, auto, lp)
+      else if (auto && lp)          playFromIdx(d, 0,    spd, vc, md, auto, lp)
       else { setPlaying(false); setPaused(false); setIdx(0) }
     })
-  }, [voices, speakQueue])
+  }, [speakQueue])
 
   // ── Controls ──────────────────────────────────────────────────────────────
 
   const handlePlay = () => {
-    if (paused) { window.speechSynthesis.resume(); setPaused(false); setPlaying(true); return }
+    if (paused && audioRef.current) { audioRef.current.play(); setPaused(false); setPlaying(true); return }
     stopAll()
-    const { deck: d, idx: i, speed: spd, voiceIdx: vi, mode: md, auto, loop: lp } = playRef.current
-    setTimeout(() => playFromIdx(d, i, spd, vi, md, auto, lp), 50)
+    const { deck: d, idx: i, speed: spd, voice: vc, mode: md, auto, loop: lp } = playRef.current
+    setTimeout(() => playFromIdx(d, i, spd, vc, md, auto, lp), 50)
   }
 
-  const handlePause = () => { window.speechSynthesis.pause(); setPaused(true); setPlaying(false) }
+  const handlePause = () => {
+    if (audioRef.current) audioRef.current.pause()
+    setPaused(true); setPlaying(false)
+  }
 
   const jump = (dir) => {
-    const { deck: d, speed: spd, voiceIdx: vi, mode: md, auto, loop: lp } = playRef.current
+    const { deck: d, speed: spd, voice: vc, mode: md, auto, loop: lp } = playRef.current
     const next = Math.max(0, Math.min(d.length - 1, idx + dir))
     stopAll(); setIdx(next); setPaused(false)
-    if (playing) setTimeout(() => playFromIdx(d, next, spd, vi, md, auto, lp), 50)
+    if (playing) setTimeout(() => playFromIdx(d, next, spd, vc, md, auto, lp), 50)
   }
 
   const restart = () => { stopAll(); setIdx(0); setPlaying(false); setPaused(false) }
@@ -203,15 +231,15 @@ export default function App() {
     setSpeed(spd); playRef.current.speed = spd
     if (playing && !paused) {
       stopAll()
-      const { deck: d, idx: i, voiceIdx: vi, mode: md, auto, loop: lp } = playRef.current
-      setTimeout(() => playFromIdx(d, i, spd, vi, md, auto, lp), 50)
+      const { deck: d, idx: i, voice: vc, mode: md, auto, loop: lp } = playRef.current
+      setTimeout(() => playFromIdx(d, i, spd, vc, md, auto, lp), 50)
     }
   }
 
   const jumpTo = (i) => {
-    const { deck: d, speed: spd, voiceIdx: vi, mode: md, auto, loop: lp } = playRef.current
+    const { deck: d, speed: spd, voice: vc, mode: md, auto, loop: lp } = playRef.current
     stopAll(); setIdx(i); setPaused(false)
-    if (playing) setTimeout(() => playFromIdx(d, i, spd, vi, md, auto, lp), 50)
+    if (playing) setTimeout(() => playFromIdx(d, i, spd, vc, md, auto, lp), 50)
   }
 
   const currentQ = deck[idx] || null
@@ -225,7 +253,7 @@ export default function App() {
           <div className="logo">🎧</div>
           <div className="header-text">
             <div className="header-title">Behavioral Audiobook</div>
-            <div className="header-sub">Web Speech · Works offline</div>
+            <div className="header-sub">OpenAI TTS · Natural voice</div>
           </div>
           <button
             className={`offline-btn ${offlineStatus}`}
@@ -241,21 +269,29 @@ export default function App() {
 
       <div className="body">
 
+        {/* API error */}
+        {apiErr && (
+          <div className="api-error">
+            ⚠️ {apiErr}
+          </div>
+        )}
+
         {/* ── Current card ── */}
         {currentQ && (
           <div className={`card ${playing ? 'active' : ''}`}>
             <div className={`card-header ${playing ? 'active' : ''}`}>
               <span className="cat-badge">{currentQ.category}</span>
-              {playing && !paused && <span className="status-tag speaking">▶ Speaking…</span>}
+              {loading             && <span className="status-tag loading">⏳ Loading…</span>}
+              {playing && !loading && !paused && <span className="status-tag speaking">▶ Speaking…</span>}
               {paused              && <span className="status-tag paused">⏸ Paused</span>}
               <span className="card-counter">{idx + 1} / {deck.length}</span>
             </div>
             <div className="card-body">
               <div className="question">{currentQ.question}</div>
-              {currentText && (
+              {curSeg && (
                 <div className="speaking-preview">
                   <span className="pulse-dot" />
-                  <span>{currentText.length > 160 ? currentText.slice(0, 160) + '…' : currentText}</span>
+                  <span>{curSeg.length > 160 ? curSeg.slice(0, 160) + '…' : curSeg}</span>
                 </div>
               )}
             </div>
@@ -264,7 +300,6 @@ export default function App() {
 
         {/* ── Player ── */}
         <div className="player">
-          {/* Speed */}
           <div className="speed-row">
             <span className="speed-label">Speed</span>
             {SPEEDS.map(sp => (
@@ -274,23 +309,23 @@ export default function App() {
             ))}
           </div>
 
-          {/* Controls */}
           <div className="controls">
             <button className="btn-ghost" onClick={restart} title="Restart">↩</button>
             <button className="btn-secondary" onClick={() => jump(-1)} disabled={idx === 0}>⏮</button>
             {playing && !paused
               ? <button className="btn-primary" onClick={handlePause}>⏸</button>
-              : <button className="btn-primary" onClick={handlePlay} disabled={deck.length === 0}>▶</button>
+              : <button className={`btn-primary ${loading ? 'btn-loading' : ''}`} onClick={handlePlay} disabled={deck.length === 0 || loading}>
+                  {loading ? <span className="spin-icon spin-white" /> : '▶'}
+                </button>
             }
             <button className="btn-secondary" onClick={() => jump(1)} disabled={idx === deck.length - 1}>⏭</button>
             <button className={`btn-loop ${loop ? 'active' : ''}`} onClick={() => setLoop(l => !l)} title="Loop">🔁</button>
           </div>
 
-          {/* Progress */}
           <div className="progress-bar"><div className="progress-fill" style={{ width: `${pct}%` }} /></div>
           <div className="progress-row">
             <span>{idx + 1} of {deck.length}</span>
-            <span>{mode === 'question' ? 'Question only' : 'Full STAR'} · {speed}x</span>
+            <span>{mode === 'question' ? 'Questions only' : 'Full STAR'} · {speed}x · {voice}</span>
           </div>
         </div>
 
@@ -298,24 +333,30 @@ export default function App() {
         <div className="section">
           <div className="section-label">Settings</div>
 
-          {/* Mode */}
-          <div style={{ marginBottom: 12 }}>
-            <div className="setting-label">Read Mode</div>
+          {/* Voice */}
+          <div style={{ marginBottom: 14 }}>
+            <div className="setting-label">Voice</div>
             <div className="pill-row">
-              <button className={`pill ${mode === 'question' ? 'active' : ''}`} onClick={() => { setMode('question'); stopAll(); setPlaying(false) }}>Question Only</button>
-              <button className={`pill ${mode === 'full' ? 'active' : ''}`}     onClick={() => { setMode('full');     stopAll(); setPlaying(false) }}>Full Q&A (STAR)</button>
+              {VOICES.map(v => (
+                <button
+                  key={v.id}
+                  className={`pill ${voice === v.id ? 'active' : ''}`}
+                  onClick={() => { setVoice(v.id); stopAll(); setPlaying(false) }}
+                >
+                  {v.label}
+                </button>
+              ))}
             </div>
           </div>
 
-          {/* Voice */}
-          {voices.length > 0 && (
-            <div style={{ marginBottom: 12 }}>
-              <div className="setting-label">Voice</div>
-              <select className="voice-select" value={voiceIdx} onChange={e => setVoiceIdx(Number(e.target.value))}>
-                {voices.map((v, i) => <option key={v.name} value={i}>{v.name} ({v.lang})</option>)}
-              </select>
+          {/* Mode */}
+          <div style={{ marginBottom: 14 }}>
+            <div className="setting-label">Read Mode</div>
+            <div className="pill-row">
+              <button className={`pill ${mode === 'question' ? 'active' : ''}`} onClick={() => { setMode('question'); stopAll(); setPlaying(false) }}>Question Only</button>
+              <button className={`pill ${mode === 'full'     ? 'active' : ''}`} onClick={() => { setMode('full');     stopAll(); setPlaying(false) }}>Full Q&A (STAR)</button>
             </div>
-          )}
+          </div>
 
           {/* Auto-advance + Loop */}
           <div className="setting-row">
@@ -331,7 +372,7 @@ export default function App() {
           </div>
         </div>
 
-        {/* ── Category filter ── */}
+        {/* ── Category ── */}
         <div className="section">
           <div className="section-label">Category · {deck.length} questions</div>
           <div className="pill-row">

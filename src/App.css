@@ -106,6 +106,7 @@ select { font-family: inherit; }
 .status-tag { font-size: 11px; font-weight: 700; }
 .status-tag.speaking { color: #7c3aed; }
 .status-tag.paused   { color: #f59e0b; }
+.status-tag.loading  { color: #6b7280; }
 .card-counter { margin-left: auto; font-size: 11px; color: #9ca3af; font-weight: 600; white-space: nowrap; }
 .card-body { padding: 14px; }
 .question { font-size: 16px; font-weight: 700; color: #1a1a2e; line-height: 1.45; }
@@ -272,6 +273,22 @@ button:disabled { opacity: 0.3; cursor: not-allowed; }
   overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
   flex: 1; min-width: 0;
 }
+
+/* API error banner */
+.api-error {
+  background: #fef2f2; border: 1px solid #fecaca;
+  border-radius: 12px; padding: 12px 14px;
+  font-size: 13px; color: #b91c1c; font-weight: 500;
+  line-height: 1.5;
+}
+
+/* Loading spinner inside play button */
+.spin-white {
+  border-color: rgba(255,255,255,0.5);
+  border-top-color: #fff;
+  width: 22px; height: 22px; border-width: 3px;
+}
+.btn-loading { opacity: 0.8; }
 
 /* ── Mobile overrides ─────────────────────────────────────────────────────── */
 @media (max-width: 480px) {
