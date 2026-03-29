@@ -86,16 +86,40 @@ export default function App() {
   const stopFlag = useRef(false)
   const playRef = useRef({ deck: [], idx: 0, speed: 0.8, voiceIdx: 0, mode: 'full', auto: true, loop: true })
 
-  // Load voices — auto-select female English
+  // Load voices — filter out novelty/gimmick voices, auto-select best female
   useEffect(() => {
     const load = () => {
       const all = window.speechSynthesis.getVoices()
-      const en = all.filter(v => v.lang.startsWith('en'))
-      if (!en.length) return
-      setVoices(en)
-      const femaleKeywords = ['female', 'samantha', 'victoria', 'karen', 'moira', 'fiona', 'tessa', 'veena', 'zira', 'hazel', 'susan', 'kate', 'sara', 'anna', 'lisa', 'linda', 'emily', 'allison', 'ava', 'google uk english female']
-      const fi = en.findIndex(v => femaleKeywords.some(k => v.name.toLowerCase().includes(k)))
-      if (fi !== -1) setVoiceIdx(fi)
+
+      // Novelty/robot/sound-effect voices — skip these entirely
+      const JUNK = ['bad news','bahh','bells','boing','bubbles','cellos','good news',
+        'jester','junior','kathy','organ','ralph','superstar','trinoids','whisper',
+        'wobble','zarvox','albert','fred']
+
+      const good = all.filter(v =>
+        v.lang.startsWith('en') &&
+        !JUNK.some(j => v.name.toLowerCase().includes(j))
+      )
+      if (!good.length) return
+      setVoices(good)
+
+      // Priority order for best-sounding female voices on Mac/iOS/Chrome
+      const FEMALE_PRIORITY = [
+        'flo (english (united states))',   // macOS modern — best female US
+        'shelley (english (united states))',
+        'sandy (english (united states))',
+        'google uk english female',        // Chrome — excellent online
+        'karen',                           // macOS AU — natural
+        'moira',                           // macOS IE — natural
+        'tessa',                           // macOS ZA — natural
+        'samantha',                        // macOS classic fallback
+        'flo', 'shelley', 'sandy',         // any locale variant
+      ]
+
+      for (const name of FEMALE_PRIORITY) {
+        const i = good.findIndex(v => v.name.toLowerCase().includes(name))
+        if (i !== -1) { setVoiceIdx(i); return }
+      }
     }
     load()
     window.speechSynthesis.addEventListener('voiceschanged', load)
